@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string>
 #include <vector>
+#include "fpu.hpp"
 using namespace std;
 
 string label_str_tmp;
@@ -385,7 +386,9 @@ void controller::exec_code(unsigned int one_code) {
             rd = (one_code & rd_mask) >> 21;
             rs = (one_code & rs_mask) >> 16;
             rt = (one_code & rt_mask) >> 11;
-            fregs[rd].f = fregs[rs].f / fregs[rt].f;
+
+            // fregs[rd].f = fregs[rs].f / fregs[rt].f;
+            fregs[rd].f = fregs[rs].f * finv_wrapper(fregs[rt].f);
             line_num++;
             break;
         }
@@ -408,7 +411,8 @@ void controller::exec_code(unsigned int one_code) {
         case 11: { // FLOOR rd <- -rs
             rd = (one_code & rd_mask) >> 21;
             rs = (one_code & rs_mask) >> 16;
-            fregs[rd].f = floor(fregs[rs].f);
+            fregs[rd].f = floor_wrapper(fregs[rs].f);
+            // fregs[rd].f = floor(fregs[rs].f);
             line_num++;
             break;
         }
@@ -424,7 +428,8 @@ void controller::exec_code(unsigned int one_code) {
         case 4: { // SQRT rd <- sqrt(rs)
             rd = (one_code & rd_mask) >> 21;
             rs = (one_code & rs_mask) >> 16;
-            fregs[rd].f = sqrt(fregs[rs].f);
+            fregs[rd].f = fsqrt_wrapper(fregs[rs].f);
+            // fregs[rd].f = sqrt(fregs[rs].f);
             line_num++;
             break;
         }
@@ -524,36 +529,6 @@ void controller::exec_code(unsigned int one_code) {
         break;
     }
 
-    case 6: { // BLE rs rt label(pc+offset<<2)
-        rs = (one_code & rd_mask) >> 21;
-        rt = (one_code & rs_mask) >> 16;
-        label_line = (one_code & addr_or_imm_mask);
-        if ((label_line & 0x8000) == 0x8000) { //符号拡張
-            label_line = 0xffff0000 | label_line;
-        }
-        if (regs[rs] <= regs[rt]) {
-            line_num = line_num + label_line;
-        } else {
-            line_num++;
-        }
-        break;
-    }
-
-    case 7: { // BGE rs rt label(pc+offset<<2)
-        rs = (one_code & rd_mask) >> 21;
-        rt = (one_code & rs_mask) >> 16;
-        label_line = (one_code & addr_or_imm_mask);
-        if ((label_line & 0x8000) == 0x8000) { //符号拡張
-            label_line = 0xffff0000 | label_line;
-        }
-        if (regs[rs] >= regs[rt]) {
-            line_num = line_num + label_line;
-        } else {
-            line_num++;
-        }
-        break;
-    }
-
     case 8: { // ADDI rd <- rs + immediate
         rd = (one_code & rd_mask) >> 21;
         rs = (one_code & rs_mask) >> 16;
@@ -591,36 +566,6 @@ void controller::exec_code(unsigned int one_code) {
         regs[rd] = regs[rs] ^ immediate;
         regs[rd] = regs[rs] ^ (immediate & 0xffff);
         line_num++;
-        break;
-    }
-
-    case 20: { // BEQF rs rt label(pc+offset<<2)
-        rs = (one_code & rd_mask) >> 21;
-        rt = (one_code & rs_mask) >> 16;
-        label_line = (one_code & addr_or_imm_mask);
-        if ((label_line & 0x8000) == 0x8000) { //符号拡張
-            label_line = 0xffff0000 | label_line;
-        }
-        if (fregs[rs].f == fregs[rt].f) {
-            line_num = line_num + label_line;
-        } else {
-            line_num++;
-        }
-        break;
-    }
-
-    case 22: { // BLTF rs rt label(pc+offset<<2)
-        rs = (one_code & rd_mask) >> 21;
-        rt = (one_code & rs_mask) >> 16;
-        label_line = (one_code & addr_or_imm_mask);
-        if ((label_line & 0x8000) == 0x8000) { //符号拡張
-            label_line = 0xffff0000 | label_line;
-        }
-        if (fregs[rs].f < fregs[rt].f) {
-            line_num = line_num + label_line;
-        } else {
-            line_num++;
-        }
         break;
     }
 
@@ -921,27 +866,9 @@ int controller::get_offset_by_base_plus_offset(string base_plus_offset) {
         try {
             offset = stoi(offset_str); // convert string to int
             if (sign == "-") {
-                if (offset <= 32768) { // -2^15まで
-                    return -offset;
-                } else {
-                    if (log_level >= FATAL) {
-                        printf("FATAL\tline:%d\tinvalid offset: "
-                               "[%s](under -2^15)\n",
-                               load_line_num, offset_str.c_str());
-                    }
-                    exit(1);
-                }
+                return -offset;
             } else {
-                if (offset <= 32767) { // 2^15-1まで
-                    return offset;
-                } else {
-                    if (log_level >= FATAL) {
-                        printf("FATAL\tline:%d\tinvalid offset: "
-                               "[%s](over 2^15-1)\n",
-                               load_line_num, offset_str.c_str());
-                    }
-                    exit(1);
-                }
+                return offset;
             }
         } catch (std::out_of_range &e) {
             if (log_level >= FATAL) {
@@ -3054,162 +2981,7 @@ unsigned int controller::format_code(vector<string> code) {
                    arg_num, get_raw_program_by_line_num(line_num).c_str());
             exit(1);
         }
-    } else if (opecode == "ble") { // BLE rs rt label(pc+offset<<2)
-        unsigned int op_bit = (0x6 << 26);
-        unsigned int rd_bit = 0x0;
-        unsigned int rs_bit = 0x0;
-        unsigned int offset_bit; // 下位16bit のみ
-        try {
-            if (iter == code.end()) {
-                throw 1;
-            } else {
-                int rs = get_reg_num(*iter);
-                rd_bit = ((unsigned int)rs << 21);
-                iter++;
-            }
-            if (iter == code.end()) {
-                throw 2;
-            } else {
-                int rt = get_reg_num(*iter);
-                rs_bit = ((unsigned int)rt << 16);
-                iter++;
-            }
-            if (iter == code.end()) {
-                throw 3;
-            } else {
-                string label_str = *iter;
-                int label_num = get_line_num_by_label(label_str);
-                offset_bit = (label_num - line_num) & 0xffff;
-                iter++;
-            }
-            if (iter != code.end()) {
-                throw 4;
-            }
 
-            result = op_bit | rd_bit | rs_bit | offset_bit;
-
-        } catch (int arg_num) {
-            printf("FATAL\tline:%d\tinvalid argument%d: [%s]\n", load_line_num,
-                   arg_num, get_raw_program_by_line_num(line_num).c_str());
-            exit(1);
-        }
-    } else if (opecode == "bge") { // BGE rs rt label(pc+offset<<2)
-        unsigned int op_bit = (0x7 << 26);
-        unsigned int rd_bit = 0x0;
-        unsigned int rs_bit = 0x0;
-        unsigned int offset_bit; // 下位16bit のみ
-        try {
-            if (iter == code.end()) {
-                throw 1;
-            } else {
-                int rs = get_reg_num(*iter);
-                rd_bit = ((unsigned int)rs << 21);
-                iter++;
-            }
-            if (iter == code.end()) {
-                throw 2;
-            } else {
-                int rt = get_reg_num(*iter);
-                rs_bit = ((unsigned int)rt << 16);
-                iter++;
-            }
-            if (iter == code.end()) {
-                throw 3;
-            } else {
-                string label_str = *iter;
-                int label_num = get_line_num_by_label(label_str);
-                offset_bit = (label_num - line_num) & 0xffff;
-                iter++;
-            }
-            if (iter != code.end()) {
-                throw 4;
-            }
-
-            result = op_bit | rd_bit | rs_bit | offset_bit;
-
-        } catch (int arg_num) {
-            printf("FATAL\tline:%d\tinvalid argument%d: [%s]\n", load_line_num,
-                   arg_num, get_raw_program_by_line_num(line_num).c_str());
-            exit(1);
-        }
-    } else if (opecode == "beqf") { // BEQF rs rt label(pc+offset<<2)
-        unsigned int op_bit = (0x14 << 26);
-        unsigned int rd_bit = 0x0;
-        unsigned int rs_bit = 0x0;
-        unsigned int offset_bit; // 下位16bit のみ
-        try {
-            if (iter == code.end()) {
-                throw 1;
-            } else {
-                int rs = get_freg_num(*iter);
-                rd_bit = ((unsigned int)rs << 21);
-                iter++;
-            }
-            if (iter == code.end()) {
-                throw 2;
-            } else {
-                int rt = get_freg_num(*iter);
-                rs_bit = ((unsigned int)rt << 16);
-                iter++;
-            }
-            if (iter == code.end()) {
-                throw 3;
-            } else {
-                string label_str = *iter;
-                int label_num = get_line_num_by_label(label_str);
-                offset_bit = (label_num - line_num) & 0xffff;
-                iter++;
-            }
-            if (iter != code.end()) {
-                throw 4;
-            }
-
-            result = op_bit | rd_bit | rs_bit | offset_bit;
-
-        } catch (int arg_num) {
-            printf("FATAL\tline:%d\tinvalid argument%d: [%s]\n", load_line_num,
-                   arg_num, get_raw_program_by_line_num(line_num).c_str());
-            exit(1);
-        }
-    } else if (opecode == "bltf") { // BLTF rs rt label(pc+offset<<2)
-        unsigned int op_bit = (0x16 << 26);
-        unsigned int rd_bit = 0x0;
-        unsigned int rs_bit = 0x0;
-        unsigned int offset_bit; // 下位16bit のみ
-        try {
-            if (iter == code.end()) {
-                throw 1;
-            } else {
-                int rs = get_freg_num(*iter);
-                rd_bit = ((unsigned int)rs << 21);
-                iter++;
-            }
-            if (iter == code.end()) {
-                throw 2;
-            } else {
-                int rt = get_freg_num(*iter);
-                rs_bit = ((unsigned int)rt << 16);
-                iter++;
-            }
-            if (iter == code.end()) {
-                throw 3;
-            } else {
-                string label_str = *iter;
-                int label_num = get_line_num_by_label(label_str);
-                offset_bit = (label_num - line_num) & 0xffff;
-                iter++;
-            }
-            if (iter != code.end()) {
-                throw 4;
-            }
-
-            result = op_bit | rd_bit | rs_bit | offset_bit;
-
-        } catch (int arg_num) {
-            printf("FATAL\tline:%d\tinvalid argument%d: [%s]\n", load_line_num,
-                   arg_num, get_raw_program_by_line_num(line_num).c_str());
-            exit(1);
-        }
     } else if (opecode == "j") { // J label
         unsigned int op_bit = (0x2 << 26);
         unsigned int addr_bit;
